@@ -25,7 +25,9 @@ DDR5-5600, Windows 11, on mains power. The opening of the game, five-minute runs
 | No DLSS | Series X | 83 ms (short run, see notes) | 12 |
 | For comparison: upstream VIctory + its NVIDIA pull requests | Series X | 1,829 ms | 0.5 |
 
-Every run, its settings and its limits: [docs/results.md](docs/results.md). The title paces itself at 30 frames
+Every run, its settings and its limits: [docs/results.md](docs/results.md). What we learned getting here (why
+upstream is slow on this card, how we measured, a survey of the NVIDIA forks): [docs/findings.md](docs/findings.md).
+The title paces itself at 30 frames
 a second, and these are early numbers from one machine: the picture was not judged and longer play was not
 measured.
 
@@ -76,6 +78,15 @@ Then play with the fork's own launcher, on the settings measured above:
   with, so the next one does not hitch on them (row 3 to row 2 above).
 - In the game, F1 is the fork's settings menu and F3 its stats panel; Enter or Space is A, Esc is Menu, or use
   a controller.
+
+## Memory on a 32 GB laptop
+
+The game takes 20-23.5 GB, so check Task Manager's *Available* memory before you start: about 25 GB is
+comfortable. A browser with many tabs, chat and AI desktop apps, game launchers (Steam, Epic), music, cloud
+sync and VPN apps each take hundreds of MB to a few GB; close them for the session, and take the ones you do not
+need every day out of *Settings > Apps > Startup*. Keep the laptop maker's control app (fans, power), the audio
+and NVIDIA services and your antivirus. Leave Windows' paging file on (system managed): with it a tight moment
+slows down instead of ending the game.
 
 ## Reporting
 
