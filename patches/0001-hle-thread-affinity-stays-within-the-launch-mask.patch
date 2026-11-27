@@ -1,0 +1,186 @@
+From 30f60418f6c7d5d2b35563c17d3486a152fc8327 Mon Sep 17 00:00:00 2001
+From: migtrace <79698665+migtrace@users.noreply.github.com>
+Date: Thu, 26 Nov 2026 13:25:43 +0000
+Subject: [PATCH 1/2] HLE: title thread affinity stays within the mask victory
+ was started with
+
+The title places its threads with SetThreadGroupAffinity (api-ms-win-core-processtopology), on the console's processor numbers, and the host got the call as made. On Windows 11 a thread may be given processors outside its process's affinity; the process's affinity then widens to them and every later thread inherits it. A run started with 'start /affinity FFFFFCFF' (keeping it off a faulty core) showed FFFFFFFF 15 s in.
+
+The kernel module now implements SetThreadGroupAffinity: a group-0 request is narrowed to the process's affinity at the first call (the launch mask; nothing else widens it), or given the whole launch mask where they do not meet. A launch on every processor passes requests on as asked; other groups are passed on unchanged.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+(cherry picked from commit 5d16d51e3b09ddd7c2a0521729121b8cb575db6a)
+---
+ crates/victory-hle/src/modules/kernel.rs | 120 +++++++++++++++++++++++
+ 1 file changed, 120 insertions(+)
+
+diff --git a/crates/victory-hle/src/modules/kernel.rs b/crates/victory-hle/src/modules/kernel.rs
+index 5b8fb20..a0a3962 100644
+--- a/crates/victory-hle/src/modules/kernel.rs
++++ b/crates/victory-hle/src/modules/kernel.rs
+@@ -290,6 +290,66 @@ pub extern "system" fn TerminateProcess(process: *mut c_void, code: u32) -> i32
+     host::terminate_process(process, code)
+ }
+ 
++/// `GROUP_AFFINITY`: a processor mask within a processor group.
++#[repr(C)]
++#[derive(Clone, Copy, Debug)]
++pub struct GroupAffinity {
++    pub mask: usize,
++    pub group: u16,
++    pub reserved: [u16; 3],
++}
++
++/// The processors of `requested` among `launch`'s; all of `launch`'s where
++/// they do not meet. Pure, for testing.
++fn affinity_within(requested: usize, launch: usize) -> usize {
++    match requested & launch {
++        0 => launch,
++        within => within,
++    }
++}
++
++/// Title threads stay on the processors `victory` was started on.
++///
++/// The title places its threads with `SetThreadGroupAffinity`, on the
++/// console's processor numbers. On Windows 11 a thread may be given
++/// processors outside its process's affinity, which the process's then
++/// widens to (and every thread made after inherits): a user's
++/// `start /affinity` mask (keeping a run off a faulty core, or off
++/// efficiency cores) did not hold past the title's first call. Here the
++/// request in processor group 0 is narrowed to the processors the process
++/// had at the first call (`victory`'s launch mask, as no other call widens
++/// it); without a launch mask (every processor) it is passed on as asked.
++/// Other groups are passed on unchanged.
++pub extern "system" fn SetThreadGroupAffinity(
++    thread: *mut c_void,
++    affinity: *const GroupAffinity,
++    previous: *mut GroupAffinity,
++) -> i32 {
++    if affinity.is_null() {
++        return host::set_thread_group_affinity(thread, affinity, previous);
++    }
++    // SAFETY: the title passes a GROUP_AFFINITY (checked non-null).
++    let mut asked = unsafe { affinity.read_unaligned() };
++    if asked.group == 0 {
++        static LAUNCH: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
++        let launch = *LAUNCH.get_or_init(host::process_affinity);
++        let within = affinity_within(asked.mask, launch);
++        if within != asked.mask {
++            static ONCE: std::sync::Once = std::sync::Once::new();
++            ONCE.call_once(|| {
++                tracing::info!(
++                    asked = format_args!("{:#x}", asked.mask),
++                    launch = format_args!("{launch:#x}"),
++                    within = format_args!("{within:#x}"),
++                    "title thread affinity kept within the launch mask (first of possibly many)"
++                )
++            });
++        }
++        asked.mask = within;
++    }
++    host::set_thread_group_affinity(thread, &asked, previous)
++}
++
+ /// The pseudo handle of one of our modules: its address, never a real image.
+ fn handle(m: &HleModule) -> *mut c_void {
+     m as *const HleModule as *mut c_void
+@@ -442,6 +502,7 @@ pub(crate) fn module() -> HleModule {
+             "kernelbase.dll",
+             "api-ms-win-core-libraryloader-*",
+             "api-ms-win-core-processthreads-*",
++            "api-ms-win-core-processtopology-*",
+             "api-ms-win-core-debug-*",
+             "api-ms-win-core-errorhandling-*",
+             "api-ms-win-crt-runtime-*",
+@@ -469,6 +530,7 @@ pub(crate) fn module() -> HleModule {
+             hle_export!(TerminateProcess),
+             hle_export!(SetUnhandledExceptionFilter),
+             hle_export!(SetThreadPriority),
++            hle_export!(SetThreadGroupAffinity),
+         ],
+     }
+ }
+@@ -573,6 +635,40 @@ mod host {
+         unsafe { TerminateProcess(process, code) }
+     }
+ 
++    #[link(name = "kernel32")]
++    unsafe extern "system" {
++        #[link_name = "SetThreadGroupAffinity"]
++        fn host_set_thread_group_affinity(
++            thread: *mut c_void,
++            affinity: *const super::GroupAffinity,
++            previous: *mut super::GroupAffinity,
++        ) -> i32;
++    }
++
++    pub(super) fn set_thread_group_affinity(
++        thread: *mut c_void,
++        affinity: *const super::GroupAffinity,
++        previous: *mut super::GroupAffinity,
++    ) -> i32 {
++        // SAFETY: the title's arguments (or ours, a live local), as the
++        // host's function takes them.
++        unsafe { host_set_thread_group_affinity(thread, affinity, previous) }
++    }
++
++    /// This process's affinity mask (group 0); every processor if unknown.
++    pub(super) fn process_affinity() -> usize {
++        let (mut process, mut system) = (0usize, 0usize);
++        // SAFETY: the current process's pseudo handle and two locals.
++        let ok = unsafe {
++            windows_sys::Win32::System::Threading::GetProcessAffinityMask(
++                windows_sys::Win32::System::Threading::GetCurrentProcess(),
++                &mut process,
++                &mut system,
++            )
++        };
++        if ok == 0 || process == 0 { usize::MAX } else { process }
++    }
++
+     pub(super) fn set_unhandled_exception_filter(filter: extern "system" fn(*const c_void) -> i32) {
+         // SAFETY: our filter takes the exception pointers as an opaque pointer.
+         unsafe {
+@@ -668,6 +764,18 @@ mod host {
+         std::process::exit(code as i32)
+     }
+ 
++    pub(super) fn set_thread_group_affinity(
++        _: *mut c_void,
++        _: *const super::GroupAffinity,
++        _: *mut super::GroupAffinity,
++    ) -> i32 {
++        0
++    }
++
++    pub(super) fn process_affinity() -> usize {
++        usize::MAX
++    }
++
+     pub(super) fn set_unhandled_exception_filter(_: extern "system" fn(*const c_void) -> i32) {}
+ 
+     pub(super) fn report_unhandled(_: *const c_void) {}
+@@ -701,6 +809,18 @@ mod tests {
+         .unwrap();
+     }
+ 
++    /// A title thread's processors stay among those `victory` was started
++    /// on: the request where they meet, all of the launch's where they do
++    /// not; a launch on every processor (no mask) changes nothing.
++    #[test]
++    fn thread_affinity_stays_within_the_launch_mask() {
++        let launch = 0xFFFF_FCFF; // every processor but 8 and 9
++        assert_eq!(affinity_within(0x300, launch), launch, "only 8 and 9 asked: the launch's instead");
++        assert_eq!(affinity_within(0x3F0, launch), 0xF0, "8 and 9 taken out");
++        assert_eq!(affinity_within(0x3, launch), 0x3, "inside: as asked");
++        assert_eq!(affinity_within(0x300, usize::MAX), 0x300, "no launch mask: as asked");
++    }
++
+     #[test]
+     fn title_images_report_their_original_path() {
+         let base = 0x7000_0000_0000;
+-- 
+2.56.1.windows.1
+

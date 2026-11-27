@@ -1,0 +1,2 @@
+# Patches stay byte-for-byte as made (git apply takes them as they are).
+*.patch -text

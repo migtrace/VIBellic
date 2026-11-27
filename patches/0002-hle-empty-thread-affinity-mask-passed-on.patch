@@ -1,0 +1,47 @@
+From 2665637e87cc6a18ee920f3cdc2220e926d7cbe6 Mon Sep 17 00:00:00 2001
+From: migtrace <79698665+migtrace@users.noreply.github.com>
+Date: Thu, 26 Nov 2026 14:37:46 +0000
+Subject: [PATCH 2/2] HLE: an empty thread affinity mask is passed on as asked
+
+Windows takes a SetThreadGroupAffinity request with an empty mask as the process's own affinity (measured on Windows 11 26300: the call succeeds and the thread gets the process's mask), which is already the launch mask. It was replaced with the launch mask, which is the same on a known launch mask but all processors' bits when the process's mask cannot be read.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+
+(cherry picked from commit 75eede2f2499fab90db9a06025a1a954d853e8dd)
+---
+ crates/victory-hle/src/modules/kernel.rs | 11 ++++++++++-
+ 1 file changed, 10 insertions(+), 1 deletion(-)
+
+diff --git a/crates/victory-hle/src/modules/kernel.rs b/crates/victory-hle/src/modules/kernel.rs
+index a0a3962..363cf47 100644
+--- a/crates/victory-hle/src/modules/kernel.rs
++++ b/crates/victory-hle/src/modules/kernel.rs
+@@ -300,8 +300,12 @@ pub struct GroupAffinity {
+ }
+ 
+ /// The processors of `requested` among `launch`'s; all of `launch`'s where
+-/// they do not meet. Pure, for testing.
++/// they do not meet. An empty request is passed on as asked: Windows takes
++/// it as the process's own affinity. Pure, for testing.
+ fn affinity_within(requested: usize, launch: usize) -> usize {
++    if requested == 0 {
++        return 0;
++    }
+     match requested & launch {
+         0 => launch,
+         within => within,
+@@ -819,6 +823,11 @@ mod tests {
+         assert_eq!(affinity_within(0x3F0, launch), 0xF0, "8 and 9 taken out");
+         assert_eq!(affinity_within(0x3, launch), 0x3, "inside: as asked");
+         assert_eq!(affinity_within(0x300, usize::MAX), 0x300, "no launch mask: as asked");
++        // An empty mask is the process's own affinity to Windows (measured on
++        // Windows 11 26300: the call succeeds and the thread gets the
++        // process's mask): passed on as asked.
++        assert_eq!(affinity_within(0, launch), 0, "empty: as asked");
++        assert_eq!(affinity_within(0, usize::MAX), 0, "empty, no launch mask: as asked");
+     }
+ 
+     #[test]
+-- 
+2.56.1.windows.1
+
