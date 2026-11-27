@@ -48,3 +48,19 @@ GPU, is the limit, and DLSS's lower scene scale makes it smaller too.
   26-30 frames a second on an RTX 5070 12 GB desktop at 1440p).
 - Longer play: these are five-minute runs of the opening.
 - The picture, side by side with and without DLSS.
+
+## Later runs (27 November, evening), added without changing the table above
+
+Same laptop and build (`f299fba` + `patches/0001-0002`), RT off, title cap 30, water light and two programs left out
+as in the fork's launcher. Statistics of 5-second windows (see `tools/frame-summary.py`); "throughput" is frames
+over seconds of world windows.
+
+| Run | Settings | Profile | Scene | Median window ms (p10-p90) | Throughput fps | Notes |
+|---|---|---|---|---|---|---|
+| 11 | DLSS Quality + FG 2x | Series X | opening, unattended | 95.8 (83.3-106.1) | 10.7 (mean of windows) | DLSS ran out of video memory 2,695 times; FG produced almost no frames: **do not combine Series X with DLSS + FG on 12 GB** |
+| 12 | DLSS Quality + FG 2x | Series S | **hand-played, ~10 min** | 40.6 (34.3-86.4) | 21.75 | first moving play: new areas made up to 1,027 pipelines at once (dropped draws 28.9 %, 125-442 ms windows); `victory warm --used` afterwards |
+| ~~A1, A2~~ | DLSS Quality, FG off | Series S | opening, scripted presses, **but someone was also playing** | 40.5 and 44.4 | 22.10 and 20.33 | **invalid as a comparison**: the player's input made the runs different; not a noise measurement |
+| ~~B1, B2~~ | as A + experimental `patches/0003` (`VICTORY_FOUND_SLOTS=8192`) | Series S | as A1/A2 | 49.5 and 43.0 | 19.23 and 20.88 | **invalid**: no conclusion about the experiment; to be repeated hands-off |
+
+Presented frame rates with FG are not measured (the layer counts generated frames, not a presented rate). Per-frame
+lows are not available from these logs. Full analysis: [optimisation-gap-analysis.md](optimisation-gap-analysis.md).

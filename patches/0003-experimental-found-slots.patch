@@ -1,0 +1,157 @@
+VIBellic EXPERIMENT (not recommended: off unless VICTORY_FOUND_SLOTS is set): FOUND slot count as a switch
+
+Base: fxceless/victory-fork f299fba1a02b68dba12b2f8d995dacaeb55081ef with patches 0001 and 0002 applied
+(= VIBellic local fx-testing 2665637e87cc6a18ee920f3cdc2220e926d7cbe6).
+File: crates/victory-gpu/src/shadow.rs (shadow::found_slots, parse_found_slots, found_index; tests in
+shadow::found_slot_tests). Idea: maren-halv/VIctory-Fast e0e549a202ccc760efa5a97e6193176ce4886f17, shadow.rs keeps
+FOUND_MOST = 8192 (GPL-3.0); no code copied. Licence of this patch: GPL-3.0-or-later.
+Unset, the slots and the hash are exactly as before (tested against the old formula over 100,000 random asks).
+
+Apply (after 0001 and 0002):  git apply --check <kit>\patches\0003-experimental-found-slots.patch
+                               git apply <kit>\patches\0003-experimental-found-slots.patch
+Revert:                        git apply -R <kit>\patches\0003-experimental-found-slots.patch
+Test:  cargo test --locked -p victory-gpu --lib shadow::found_slot_tests
+Use:   set VICTORY_FOUND_SLOTS=8192   (a power of two, 1024..65536; read once at start)
+Measured: docs/optimisation-gap-analysis.md (A/B on the laptop of docs/results.md).
+
+diff --git a/crates/victory-gpu/src/shadow.rs b/crates/victory-gpu/src/shadow.rs
+index 137de41..af9b076 100644
+--- a/crates/victory-gpu/src/shadow.rs
++++ b/crates/victory-gpu/src/shadow.rs
+@@ -5103,9 +5103,45 @@ fn buffers() -> std::sync::RwLockWriteGuard<'static, BTreeMap<(u64, usize), Entr
+ /// How often [`BUFFERS`] was taken to be changed.
+ static BUFFERS_CHANGED: AtomicU64 = AtomicU64::new(1);
+ 
+-/// Answers a thread remembers.
++/// Answers a thread remembers by default (`VICTORY_FOUND_SLOTS` changes it).
+ const FOUND_MOST: usize = 1024;
+ 
++/// The most answers `VICTORY_FOUND_SLOTS` may ask a thread to remember.
++const FOUND_SLOTS_MOST: usize = 65_536;
++
++/// `VICTORY_FOUND_SLOTS=<n>` (VIBellic experiment, off unless set): how many
++/// answers each thread remembers in [`FOUND`], a power of two from 1,024 to
++/// 65,536; unset or anything else keeps 1,024, the slots and the hash exactly
++/// as before. More slots mean fewer different asks sharing one; what is
++/// remembered and when it stops counting ([`BUFFERS_CHANGED`]) is unchanged.
++/// The idea is VIctory-Fast's (maren-halv/VIctory-Fast e0e549a2, GPL-3.0:
++/// 8,192 there "without conflict thrashing"); read once.
++fn found_slots() -> usize {
++    static SLOTS: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
++    *SLOTS.get_or_init(|| {
++        let spec = std::env::var("VICTORY_FOUND_SLOTS").ok();
++        let slots = parse_found_slots(spec.as_deref());
++        if spec.is_some() {
++            tracing::info!(slots, "VICTORY_FOUND_SLOTS: answers each recording thread remembers");
++        }
++        slots
++    })
++}
++
++/// `VICTORY_FOUND_SLOTS`'s value: a power of two in 1,024..=65,536, else 1,024.
++fn parse_found_slots(spec: Option<&str>) -> usize {
++    spec.and_then(|s| s.trim().parse::<usize>().ok())
++        .filter(|n| n.is_power_of_two() && (FOUND_MOST..=FOUND_SLOTS_MOST).contains(n))
++        .unwrap_or(FOUND_MOST)
++}
++
++/// The slot of an ask among `slots` (a power of two): the hash's top bits, so
++/// that 1,024 slots give the slot they always had (the top 10 bits).
++fn found_index(address: u64, len: u64, slots: usize) -> usize {
++    let h = (address ^ len.rotate_left(32)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
++    (h >> (64 - slots.trailing_zeros())) as usize
++}
++
+ /// An ask (address, bytes), the count of changes it was answered at, and the
+ /// answer.
+ type Found = (u64, u64, u64, std::sync::Weak<Shadow>);
+@@ -5124,8 +5160,7 @@ fn quick_find() -> bool {
+ }
+ 
+ fn found_at(address: u64, len: u64) -> usize {
+-    let h = (address ^ len.rotate_left(32)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+-    (h >> 54) as usize % FOUND_MOST
++    found_index(address, len, found_slots())
+ }
+ 
+ /// What this thread remembers of an ask, if nothing changed since.
+@@ -5147,12 +5182,78 @@ fn remember(address: u64, len: u64, changed: u64, shadow: &Arc<Shadow>) {
+     FOUND.with(|f| {
+         let mut f = f.borrow_mut();
+         if f.is_empty() {
+-            f.resize_with(FOUND_MOST, || (0, 0, 0, std::sync::Weak::new()));
++            f.resize_with(found_slots(), || (0, 0, 0, std::sync::Weak::new()));
+         }
+         f[found_at(address, len)] = (address, len, changed, Arc::downgrade(shadow));
+     });
+ }
+ 
++#[cfg(test)]
++mod found_slot_tests {
++    use super::*;
++
++    #[test]
++    fn found_slots_take_only_powers_of_two_in_range() {
++        assert_eq!(parse_found_slots(None), 1024, "unset: as before");
++        assert_eq!(parse_found_slots(Some("8192")), 8192);
++        assert_eq!(parse_found_slots(Some(" 4096 ")), 4096, "spaces");
++        assert_eq!(parse_found_slots(Some("65536")), 65_536, "the most");
++        assert_eq!(parse_found_slots(Some("1024")), 1024);
++        assert_eq!(parse_found_slots(Some("1000")), 1024, "not a power of two");
++        assert_eq!(parse_found_slots(Some("512")), 1024, "fewer than before");
++        assert_eq!(parse_found_slots(Some("131072")), 1024, "past the most");
++        assert_eq!(parse_found_slots(Some("0")), 1024);
++        assert_eq!(parse_found_slots(Some("-8192")), 1024);
++        assert_eq!(parse_found_slots(Some("lots")), 1024);
++        assert_eq!(parse_found_slots(Some("")), 1024);
++    }
++
++    /// 1,024 slots: the slot of every ask is the one the old `found_at` gave.
++    #[test]
++    fn default_slots_index_as_before() {
++        let old = |address: u64, len: u64| {
++            let h = (address ^ len.rotate_left(32)).wrapping_mul(0x9E37_79B9_7F4A_7C15);
++            (h >> 54) as usize % 1024
++        };
++        let mut x = 0x1234_5678_9abc_def0_u64;
++        for _ in 0..100_000 {
++            x ^= x << 13;
++            x ^= x >> 7;
++            x ^= x << 17;
++            let (address, len) = (x & 0x0000_7fff_ffff_fff0, (x >> 40) & 0xf_ffff);
++            assert_eq!(found_index(address, len, 1024), old(address, len));
++        }
++    }
++
++    #[test]
++    fn every_slot_count_indexes_inside_its_table_and_spreads() {
++        for slots in [1024usize, 2048, 8192, 65_536] {
++            let mut used = vec![false; slots];
++            for i in 0..(slots as u64 * 4) {
++                let at = found_index(0x2000_0000 + i * 256, 256, slots);
++                assert!(at < slots, "{slots}: {at}");
++                used[at] = true;
++            }
++            let share = used.iter().filter(|u| **u).count() as f64 / slots as f64;
++            assert!(share > 0.9, "{slots} slots: only {share:.2} used by 4x as many buffers");
++        }
++    }
++
++    /// A remembered answer stops counting when the map changes, whatever the
++    /// slot count (the count is part of what is remembered, not of the slot).
++    #[test]
++    fn a_changed_map_is_not_answered_from_memory_at_any_slot_count() {
++        for slots in [1024usize, 8192] {
++            let mut table: Vec<(u64, u64, u64)> = vec![(0, 0, 0); slots];
++            let (address, len, changed) = (0x4000_0000_u64, 4096_u64, 7_u64);
++            table[found_index(address, len, slots)] = (address, len, changed);
++            let hit = |now: u64| table[found_index(address, len, slots)] == (address, len, now);
++            assert!(hit(7));
++            assert!(!hit(8), "{slots}: a change must miss");
++        }
++    }
++}
++
+ fn buffers_read() -> std::sync::RwLockReadGuard<'static, BTreeMap<(u64, usize), Entry>> {
+     BUFFERS.read().unwrap_or_else(|e| e.into_inner())
+ }
